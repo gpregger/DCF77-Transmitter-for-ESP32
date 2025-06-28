@@ -17,6 +17,14 @@
 #include <Ticker.h>
 #include <time.h>
 
+#define DEBUG_OLED
+
+#ifdef DEBUG_OLED
+#include <M5UnitOLED.h>
+M5UnitOLED display;
+bool oneShotDraw = false;
+#endif /* DEBUG_OLED */
+
 #include <LiteLED.h>
 #define LED_TYPE LED_STRIP_SK6812
 #define LED_TYPE_IS_RGBW 0
@@ -26,6 +34,7 @@ static const crgb_t L_RED = 0xff0000;
 static const crgb_t L_GREEN = 0x00ff00;
 static const crgb_t L_BLUE = 0x0000ff;
 static const crgb_t L_WHITE = 0xe0e0e0;
+static const crgb_t L_YELLOW = 0xf0f000;
 LiteLED myLED(LED_TYPE, LED_TYPE_IS_RGBW);
 
 #include "credentials.h"    // If you put this file in the same folder that the rest of the tabs, then use "" to delimiter,
@@ -38,13 +47,13 @@ LiteLED myLED(LED_TYPE, LED_TYPE_IS_RGBW);
 
 // cron (if you choose the correct values you can even run on batteries)
 // If you choose really bad this minutes, everything goes wrong, so minuteToWakeUp must be greater than minuteToSleep
-#define minuteToWakeUp 30    // Every hoursToWakeUp at this minute the ESP32 wakes up get time and star to transmit
-#define minuteToSleep 15     // If it is running at this minute then goes to sleep and waits until minuteToWakeUp
+#define minuteToWakeUp 50    // Every hoursToWakeUp at this minute the ESP32 wakes up get time and star to transmit
+#define minuteToSleep 10     // If it is running at this minute then goes to sleep and waits until minuteToWakeUp
 
 // you can add more hours to adapt to your needs
 // When the ESP32 wakes up, check if the actual hour is in the list and
 // runs or goes to sleep until next minuteToWakeUp
-byte hoursToWakeUp[] = { 2, 3 };    
+byte hoursToWakeUp[] = { 0, 1, 2, 3};    
 
 Ticker tickerDecisec;    // TBD at 100ms
 
@@ -54,7 +63,7 @@ int impulseArray[60];
 int impulseCount = 0;
 int actualHours, actualMinutes, actualSecond, actualDay, actualMonth, actualYear, DayOfW;
 long dontGoToSleep = 0;
-const long onTimeAfterReset = 600000;    // Ten minutes
+const long onTimeAfterReset = 600000;    // run tx for ten minutes after reset regardless of cron settings
 int timeRunningContinuous = 0;
 
 const char* ntpServer = "ch.pool.ntp.org";                               // enter your closer pool or pool.ntp.org
@@ -62,34 +71,101 @@ const char* TZ_INFO = "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00";    // ente
 
 struct tm timeinfo;
 
+void flashLED(crgb_t, int, int);
+void oledWrite(const char*, const char*, const char*, const char*);
+
 void setup() {
+#ifdef DEBUG_OLED
+    display.begin();
+    display.setColorDepth(1);
+    if (display.isEPD())
+    {
+        display.setEpdMode(epd_mode_t::epd_fastest);
+        display.invertDisplay(true);
+        display.clear(TFT_BLACK);
+    }
+    if (display.width() < display.height())
+    {
+        display.setRotation(display.getRotation() ^ 1);
+    }
+    display.setFont(&fonts::FreeMono9pt7b);
+    display.setTextSize(1);
+#endif /* DEBUG_OLED */
+
+    myLED.begin(LED_GPIO, 1);
+    myLED.brightness(LED_BRIGHTNESS);    // set the LED photon intensity level
+    myLED.setPixel(0, L_RED, 1);         // set the LED colour and show it
+    delay(1000);
+
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
 
     Serial.begin(115200);
     Serial.println();
     Serial.println("DCF77 transmitter");
 
+#ifdef DEBUG_OLED
+    oledWrite("init...", "", "", "");
+#endif /* DEBUG_OLED */
     //can be added to save energy when battery-operated
     if (setCpuFrequencyMhz(80)) {
+        #ifdef DEBUG_OLED
+            oledWrite(NULL, "set fCPU...", NULL, NULL);
+        #endif /* DEBUG_OLED */
         Serial.print("CPU frequency set @");
         Serial.print(getCpuFrequencyMhz());
         Serial.println("Mhz");
-    } else
+        flashLED(L_GREEN, 3, 200);
+        #ifdef DEBUG_OLED
+            oledWrite(NULL, NULL, "done!", NULL);
+            delay(500);
+        #endif /* DEBUG_OLED */
+    } else {
+        #ifdef DEBUG_OLED
+            oledWrite(NULL, NULL, "failed :(", NULL);
+            delay(500);
+        #endif /* DEBUG_OLED */
         Serial.println("Fail to set cpu frequency");
+        flashLED(L_RED, 3, 200);
+    }
 
     if (esp_sleep_get_wakeup_cause() == 0) dontGoToSleep = millis();
 
     ledcAttach(ANTENNAPIN, 77500, 8);    // Set pin PWM, 77500hz DCF freq, resolution of 8bit
 
-    myLED.begin(LED_GPIO, 1);
-    myLED.brightness(LED_BRIGHTNESS);    // set the LED photon intensity level
-    myLED.setPixel(0, L_GREEN, 1);       // set the LED colour and show it
 
+    #ifdef DEBUG_OLED
+        oledWrite(NULL, "Wi-Fi...", "", NULL);
+    #endif /* DEBUG_OLED */
+    myLED.setPixel(0, L_BLUE, 1);
     WiFi_on();
+    #ifdef DEBUG_OLED
+        oledWrite(NULL, NULL, "done!", NULL);
+        delay(500);
+    #endif /* DEBUG_OLED */
+    #ifdef DEBUG_OLED
+        oledWrite(NULL, "NTP...", "", NULL);
+    #endif /* DEBUG_OLED */
     getNTP();
+    #ifdef DEBUG_OLED
+        oledWrite(NULL, NULL, "done!", NULL);
+        delay(500);
+    #endif /* DEBUG_OLED */
+    #ifdef DEBUG_OLED
+        oledWrite(NULL, "Wi-Fi off...", "", NULL);
+    #endif /* DEBUG_OLED */
     WiFi_off();
+    flashLED(L_BLUE, 3, 200);
+    #ifdef DEBUG_OLED
+        char currentTime[9];
+        sprintf(currentTime, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+        oledWrite("Last tNTP:", currentTime, NULL, NULL);
+    #endif /* DEBUG_OLED */
     show_time();
+#ifdef DEBUG_OLED
+    oledWrite(NULL, NULL, "Sent:", "...");
+#endif /* DEBUG_OLED */
 
+    myLED.setPixel(0, L_GREEN, 1);
     CodeTime();    // first conversion just for cronCheck
 #ifndef CONTINUOUSMODE
     if ((dontGoToSleep == 0) or ((dontGoToSleep + onTimeAfterReset) < millis())) cronCheck();    // first check before start anything
@@ -133,6 +209,20 @@ void CodeTime() {
     }
     actualSecond = timeinfo.tm_sec;
     if (actualSecond == 60) actualSecond = 0;
+
+#ifdef DEBUG_OLED
+    if (actualSecond == 0 && !oneShotDraw)
+    {
+        char actualTime[6];
+        sprintf(actualTime, "%02d:%02d", actualHours, actualMinutes);
+        oledWrite(NULL, NULL, NULL, actualTime);
+        oneShotDraw = true;
+    }
+    if (actualSecond != 0)
+    {
+        oneShotDraw = false;
+    }
+#endif /* DEBUG_OLED */
 
     int n, Tmp, TmpIn;
     int ParityCount = 0;
@@ -253,17 +343,35 @@ void DcfOut() {
             if (actualSecond == 36 || actualSecond == 42 || actualSecond == 45 || actualSecond == 50) Serial.print("-");
             if (actualSecond == 28 || actualSecond == 35 || actualSecond == 58) Serial.print("P");
 
-            if (impulseArray[actualSecond] == 1) Serial.print("0");
-            if (impulseArray[actualSecond] == 2) Serial.print("1");
+            if (impulseArray[actualSecond] == 1)
+            {
+#ifdef DEBUG_OLED
+                char bitInfo[6];
+                sprintf(bitInfo, "0[%02d]", actualSecond);
+                display.drawString(bitInfo, 64, 33);
+#endif /* DEBUG_OLED */
+                Serial.print("0");
+            }
+            if (impulseArray[actualSecond] == 2)
+            {
+#ifdef DEBUG_OLED
+                char bitInfo[6];
+                sprintf(bitInfo, "1[%02d]", actualSecond);
+                display.drawString(bitInfo, 64, 33);
+#endif /* DEBUG_OLED */
+                Serial.print("1");
+            }
 
             if (actualSecond == 59) {
                 Serial.println();
+#ifdef DEBUG_OLED
+                char bitInfo[6];
+                sprintf(bitInfo, "![%02d]", actualSecond);
+                display.drawString(bitInfo, 64, 33);
+#endif /* DEBUG_OLED */
                 show_time();
 #ifndef CONTINUOUSMODE
-                if ((dontGoToSleep == 0) or ((dontGoToSleep + onTimeAfterReset) < millis())){
-                    myLED.brightness(0, 1);
-                    cronCheck();
-                }
+                if ((dontGoToSleep == 0) or ((dontGoToSleep + onTimeAfterReset) < millis())) cronCheck();
 #else
                 Serial.println("CONTINUOUS MODE NO CRON!!!");
                 timeRunningContinuous++;
@@ -274,8 +382,53 @@ void DcfOut() {
     }
     if (!getLocalTime(&timeinfo)) {
         Serial.println("Error obtaining time...");
+        #ifdef DEBUG_OLED
+            oledWrite("TimeGetErr", "resetting", NULL, NULL);
+        #endif /* DEBUG_OLED */
         delay(3000);
         ESP.restart();
     }
     CodeTime();
 }
+
+void flashLED(crgb_t color, int num, int intervalMs) {
+    crgb_t oldColor = myLED.getPixelC(0);
+    myLED.setPixel(0, color, 1);
+    myLED.brightness(LED_BRIGHTNESS, 1);
+    for (int i = 0; i < num; i++) {
+        delay(intervalMs);
+        myLED.brightness(0, 1);
+        delay(intervalMs);
+        myLED.brightness(LED_BRIGHTNESS, 1);
+    }
+    myLED.setPixel(0, oldColor, 1);
+}
+
+#ifdef DEBUG_OLED
+void oledWrite(const char* line1, const char* line2, const char* line3, const char* line4) {
+    /* LINE 1 */
+    if (line1)
+    {
+        display.drawString("                ", 1, 1);
+        display.drawString(line1, 1, 1);
+    }
+    /* LINE 2 */
+    if (line2)
+    {
+        display.drawString("                ", 1, 17);
+        display.drawString(line2, 1, 17);
+    }
+    /* LINE 3 */
+    if (line3)
+    {
+        display.drawString("                ", 1, 33);
+        display.drawString(line3, 1, 33);
+    }
+    /* LINE 4 */
+    if (line4)
+    {
+        display.drawString("                ", 1, 49);
+        display.drawString(line4, 1, 49);
+    }
+}
+#endif
